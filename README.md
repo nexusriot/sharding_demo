@@ -1,12 +1,13 @@
-# Distributed Sharding & Replication (with Health Checks)
+# Distributed Sharding & Replication (with Health Checks + Quorums)
+Disclaimer: This is a PoC demo - Just for fun ;)
 
 
-
--   Client → Router → Replicas flow
--   Modulo sharding w/ R replicas
--   Consistent hashing w/ vnodes & R replicas
--   Health-based routing
--   End-to-end PUT/GET flows
+- Client → Router → Replicas flow  
+- Modulo sharding w/ R replicas  
+- Consistent hashing w/ vnodes & R replicas  
+- Health-based routing  
+- End-to-end PUT/GET flows  
+- Quorums (W/R)
 
 ## High-Level Architecture
 
@@ -106,8 +107,8 @@ If `n0` is down:
 
 Effects:
 
--   `put` → write only to healthy replicas (warn if \<R)
--   `get` → try healthy nodes until value found
+- `put` → write only to healthy replicas (warn if <R)
+- `get` → try healthy nodes until value found
 
 ## End-to-End Sequences
 
@@ -147,9 +148,67 @@ Effects:
             │ Health Awareness    │  -> skip unhealthy nodes
             └─────────────────────┘
 
+# Quorums (W/R)
+
+Quorums extend replication with stronger consistency guarantees.
+
+### Definitions
+
+- **N** = replication factor  
+- **W** = write quorum (minimum acknowledgements)  
+- **R** = read quorum (minimum successful reads)
+
+Guarantee:
+
+    If R + W > N → system prevents stale reads.
+
+### Versioned Writes
+
+Values are stored as:
+
+    (value, version)
+
+Replicas overwrite only when:
+
+    incoming_version >= current_version
+
+### Quorum Write (W)
+
+    PUT(K,V)
+       ↓
+    pick_replicas(N)
+       ↓
+    send write(version)
+       ↓
+    if ACKs >= W → success
+    else → failure
+
+### Quorum Read (R) + Read Repair
+
+    GET(K)
+       ↓
+    pick_replicas(N)
+       ↓
+    collect responses
+       ↓
+    if <R responses → failure
+    else pick newest version
+       ↓
+    read repair: update stale replicas
+
+### Summary
+
+| Feature | Basic Replication | With Quorums |
+|--------|--------------------|--------------|
+| Write | best-effort | must meet W |
+| Read | first-hit | must meet R |
+| Consistency | eventual | strong if R+W>N |
+| Repair | none | automatic read repair |
+
 ## Next Improvements
 
--   Quorums (W/R)
--   Read repair
--   Merkle anti-entropy
--   Gossip for health
+- Quorums (W/R) ✔️
+- Read repair  
+- Merkle anti-entropy  
+- Gossip for health  
+- Tunable consistency per request  

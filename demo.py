@@ -216,6 +216,8 @@ def replica_layout(keys: List[str], replicas_func, r: int, limit: int = 5) -> No
         print(f"  {k:<20} -> {names}")
 
 def demo():
+    print("Modulo vs Consistent Hash no quorum")
+
     # Nodes
     nodes_mod = [Node(f"n{i}") for i in range(4)]
     nodes_ch  = [Node(f"n{i}") for i in range(4)]
@@ -264,5 +266,178 @@ def demo():
     print("\n[CH] Marked n1 healthy again")
     print(f"GET {s} -> {client_ch.get(s)}")
 
+
+VersionedVal = Tuple[str, int]  # (value, version)
+
+@dataclass
+class QNode:
+    """
+    Versioned node for quorum simulation.
+    Uses (value, version) in store.
+    """
+    name: str
+    store: Dict[str, VersionedVal] = field(default_factory=dict)
+    healthy: bool = True
+
+    def put(self, k: str, v: str, version: int) -> None:
+        cur = self.store.get(k)
+        if cur is None or version >= cur[1]:
+            self.store[k] = (v, version)
+
+    def get(self, k: str) -> Optional[VersionedVal]:
+        return self.store.get(k)
+
+    def delete(self, k: str, version: int) -> None:
+        cur = self.store.get(k)
+        if cur is None or version >= cur[1]:
+            self.store.pop(k, None)
+
+
+class QuorumKVClient:
+    """
+    N = replication_factor
+    R = read quorum
+    W = write quorum
+
+    Assumes underlying router supports pick_replicas(key, N) and set_health(name, healthy).
+    Intended to be used with QNode, but router just needs .name and .healthy.
+    """
+
+    def __init__(self, router, replication_factor: int = 3,
+                 read_quorum: int = 2, write_quorum: int = 2) -> None:
+        self.router = router
+        self.N = replication_factor
+        self.R = read_quorum
+        self.W = write_quorum
+        self._version = 0
+
+    def _next_version(self) -> int:
+        self._version += 1
+        return self._version
+
+    def set_health(self, name: str, healthy: bool) -> None:
+        if hasattr(self.router, "set_health"):
+            self.router.set_health(name, healthy)
+
+    def put(self, k: str, v: str) -> bool:
+        replicas: List[QNode] = self.router.pick_replicas(k, self.N)  # type: ignore[assignment]
+        if not replicas:
+            print(f"[PUT] no replicas for key={k}")
+            return False
+
+        version = self._next_version()
+        acks = 0
+
+        for n in replicas:
+            if not n.healthy:
+                continue
+            n.put(k, v, version)
+            acks += 1
+
+        if acks < self.W:
+            print(f"[PUT] FAILED quorum for key={k}, acks={acks}, W={self.W}")
+            return False
+
+        if acks < self.N:
+            print(f"[PUT] key={k} wrote to only {acks}/{self.N} replicas")
+
+        return True
+
+    def get(self, k: str) -> Optional[str]:
+        replicas: List[QNode] = self.router.pick_replicas(k, self.N)  # type: ignore[assignment]
+        if not replicas:
+            print(f"[GET] no replicas for key={k}")
+            return None
+
+        responses: List[Tuple[str, int, QNode]] = []  # (value, version, node)
+        for n in replicas:
+            if not n.healthy:
+                continue
+            res = n.get(k)
+            if res is not None:
+                val, ver = res
+                responses.append((val, ver, n))
+
+        if len(responses) < self.R:
+            print(f"[GET] FAILED quorum for key={k}, responses={len(responses)}, R={self.R}")
+            return None
+
+        # pick newest
+        newest_val, newest_ver, _ = max(responses, key=lambda x: x[1])
+
+        # read repair
+        for n in replicas:
+            if not n.healthy:
+                continue
+            cur = n.get(k)
+            if cur is None or cur[1] < newest_ver:
+                n.put(k, newest_val, newest_ver)
+
+        return newest_val
+
+
+    def delete(self, k: str) -> bool:
+        replicas: List[QNode] = self.router.pick_replicas(k, self.N)  # type: ignore[assignment]
+        if not replicas:
+            print(f"[DEL] no replicas for key={k}")
+            return False
+
+        version = self._next_version()
+        acks = 0
+
+        for n in replicas:
+            if not n.healthy:
+                continue
+            n.delete(k, version)
+            acks += 1
+
+        if acks < self.W:
+            print(f"[DEL] FAILED quorum for key={k}, acks={acks}, W={self.W}")
+            return False
+
+        return True
+
+
+def demo_quorums():
+    print("\nQuorum: Consistent Hash + N/R/W + Read Repair")
+
+    # build versioned nodes
+    nodes_q = [QNode(f"q{i}") for i in range(4)]
+    # reuse ConsistentHashRouter
+    ch_q = ConsistentHashRouter(nodes_q, vnodes=64)
+
+    client = QuorumKVClient(
+        ch_q,
+        replication_factor=3,  # N
+        read_quorum=2,         # R
+        write_quorum=2,        # W
+    )
+
+    keys = [f"k{i}" for i in range(5)]
+
+    print("\n[Quorum] Writing initial values")
+    for i, k in enumerate(keys):
+        ok = client.put(k, f"V{i}")
+        print(f"PUT {k} = V{i} -> {ok}")
+
+    print("\n[Quorum] Initial reads")
+    for k in keys:
+        print(f"GET {k} -> {client.get(k)}")
+
+    # Simulate node down
+    client.set_health("q1", False)
+    print("\n[Quorum] Marked q1 unhealthy")
+
+    for k in keys:
+        print(f"GET {k} (q1 down) -> {client.get(k)}")
+
+    # Bring back q1 and show that read repair has populated it
+    client.set_health("q1", True)
+    print("\n[Quorum] Marked q1 healthy again")
+    for k in keys:
+        print(f"GET {k} (q1 back) -> {client.get(k)}")
+
+
 if __name__ == "__main__":
     demo()
+    demo_quorums()

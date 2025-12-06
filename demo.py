@@ -14,7 +14,7 @@ from typing import Dict, List, Tuple, Iterable, Optional, Set
 class Node:
     name: str
     store: Dict[str, str] = field(default_factory=dict)
-    healthy: bool = True  # health flag (acts as a super-simplified health check)
+    healthy: bool = True  # health flag
 
     def put(self, k: str, v: str) -> None:
         self.store[k] = v
@@ -163,7 +163,7 @@ class KVClient:
             self.router.set_health(name, healthy)
 
     def put(self, k: str, v: str) -> None:
-        replicas: List[Node] = []
+        replicas: List[Node]
         if hasattr(self.router, "pick_replicas"):
             replicas = self.router.pick_replicas(k, self.R)
         else:
@@ -174,7 +174,7 @@ class KVClient:
             n.put(k, v)
 
     def get(self, k: str) -> Optional[str]:
-        replicas: List[Node] = []
+        replicas: List[Node]
         if hasattr(self.router, "pick_replicas"):
             replicas = self.router.pick_replicas(k, self.R)
         else:
@@ -186,7 +186,7 @@ class KVClient:
         return None
 
     def delete(self, k: str) -> None:
-        replicas: List[Node] = []
+        replicas: List[Node]
         if hasattr(self.router, "pick_replicas"):
             replicas = self.router.pick_replicas(k, self.R)
         else:
@@ -216,12 +216,14 @@ def replica_layout(keys: List[str], replicas_func, r: int, limit: int = 5) -> No
         print(f"  {k:<20} -> {names}")
 
 def demo():
+    print("Modulo vs Consistent Hash no quorum")
+
     # Nodes
     nodes_mod = [Node(f"n{i}") for i in range(4)]
-    nodes_ch  = [Node(f"n{i}") for i in range(4)]
+    nodes_ch = [Node(f"n{i}") for i in range(4)]
 
     # Keyset
-    random.seed(42)
+    random.seed(42) # the answer to life the universe and everything
     keys = [f"k{i}-{random.getrandbits(32)}" for i in range(5_000)]
 
     # ---------- Modulo + replication ----------
@@ -264,5 +266,298 @@ def demo():
     print("\n[CH] Marked n1 healthy again")
     print(f"GET {s} -> {client_ch.get(s)}")
 
+
+VersionedVal = Tuple[str, int]  # (value, version)
+
+@dataclass
+class QNode:
+    """Versioned node for quorum and Merkle simulations."""
+    name: str
+    store: Dict[str, VersionedVal] = field(default_factory=dict)
+    healthy: bool = True
+
+    def put(self, k: str, v: str, version: int) -> None:
+        cur = self.store.get(k)
+        if cur is None or version >= cur[1]:
+            self.store[k] = (v, version)
+
+    def get(self, k: str) -> Optional[VersionedVal]:
+        return self.store.get(k)
+
+    def delete(self, k: str, version: int) -> None:
+        cur = self.store.get(k)
+        if cur is None or version >= cur[1]:
+            self.store.pop(k, None)
+
+
+class QuorumKVClient:
+    """
+    N = replication_factor
+    R = read quorum
+    W = write quorum
+    """
+
+    def __init__(self, router, replication_factor: int = 3,
+                 read_quorum: int = 2, write_quorum: int = 2) -> None:
+        self.router = router
+        self.N = replication_factor
+        self.R = read_quorum
+        self.W = write_quorum
+        self._version = 0
+
+    def _next_version(self) -> int:
+        self._version += 1
+        return self._version
+
+    def set_health(self, name: str, healthy: bool) -> None:
+        if hasattr(self.router, "set_health"):
+            self.router.set_health(name, healthy)
+
+    def put(self, k: str, v: str) -> bool:
+        replicas: List[QNode] = self.router.pick_replicas(k, self.N)  # type: ignore[assignment]
+        if not replicas:
+            print(f"[PUT] no replicas for key={k}")
+            return False
+
+        version = self._next_version()
+        acks = 0
+
+        for n in replicas:
+            if not n.healthy:
+                continue
+            n.put(k, v, version)
+            acks += 1
+
+        if acks < self.W:
+            print(f"[PUT] FAILED quorum for key={k}, acks={acks}, W={self.W}")
+            return False
+
+        if acks < self.N:
+            print(f"[PUT] key={k} wrote to only {acks}/{self.N} replicas")
+
+        return True
+
+    def get(self, k: str) -> Optional[str]:
+        replicas: List[QNode] = self.router.pick_replicas(k, self.N)  # type: ignore[assignment]
+        if not replicas:
+            print(f"[GET] no replicas for key={k}")
+            return None
+
+        responses: List[Tuple[str, int, QNode]] = []
+        for n in replicas:
+            if not n.healthy:
+                continue
+            res = n.get(k)
+            if res is not None:
+                val, ver = res
+                responses.append((val, ver, n))
+
+        if len(responses) < self.R:
+            print(f"[GET] FAILED quorum for key={k}, responses={len(responses)}, R={self.R}")
+            return None
+
+        newest_val, newest_ver, _ = max(responses, key=lambda x: x[1])
+
+        # read repair to stale replicas
+        for n in replicas:
+            if not n.healthy:
+                continue
+            cur = n.get(k)
+            if cur is None or cur[1] < newest_ver:
+                n.put(k, newest_val, newest_ver)
+
+        return newest_val
+
+    def delete(self, k: str) -> bool:
+        replicas: List[QNode] = self.router.pick_replicas(k, self.N)  # type: ignore[assignment]
+        if not replicas:
+            print(f"[DEL] no replicas for key={k}")
+            return False
+
+        version = self._next_version()
+        acks = 0
+        for n in replicas:
+            if not n.healthy:
+                continue
+            n.delete(k, version)
+            acks += 1
+
+        if acks < self.W:
+            print(f"[DEL] FAILED quorum for key={k}, acks={acks}, W={self.W}")
+            return False
+
+        return True
+
+
+def _hash_data(s: str) -> int:
+    return int(hashlib.sha1(s.encode()).hexdigest(), 16)
+
+
+class MerkleTree:
+    """
+    Simple Merkle tree over a fixed list of hashes (leaves).
+
+    For this simulation:
+    - All replicas build leaves in the same key order.
+    - If two trees have equal root -> state identical for that keyset.
+    - If roots differ -> we fall back to leaf comparison to find differing keys.
+      (Not optimal, because I'm stupid to make optimal)
+    """
+
+    def __init__(self, leaves: List[int]) -> None:
+        self.levels: List[List[int]] = []
+        if not leaves:
+            self.levels = [[0]]
+            return
+        self.levels.append(leaves)
+        level = leaves
+        while len(level) > 1:
+            next_level: List[int] = []
+            for i in range(0, len(level), 2):
+                left = level[i]
+                right = level[i + 1] if i + 1 < len(level) else left
+                combined = _hash_data(f"{left}:{right}")
+                next_level.append(combined)
+            self.levels.append(next_level)
+            level = next_level
+
+    @classmethod
+    def for_node(cls, node: QNode, keys: List[str]) -> "MerkleTree":
+        leaves: List[int] = []
+        for k in keys:
+            rec = node.get(k)
+            if rec is None:
+                payload = f"{k}:<MISSING>"
+            else:
+                val, ver = rec
+                payload = f"{k}:{val}:{ver}"
+            leaves.append(_hash_data(payload))
+        return cls(leaves)
+
+    def root(self) -> int:
+        return self.levels[-1][0] if self.levels else 0
+
+    def diff_leaf_indices(self, other: "MerkleTree") -> List[int]:
+        # If roots equal, no differences.
+        if self.root() == other.root():
+            return []
+        # Otherwise, brute-force leaf comparison.
+        a_leaves = self.levels[0]
+        b_leaves = other.levels[0]
+        diffs: List[int] = []
+        for i, (ha, hb) in enumerate(zip(a_leaves, b_leaves)):
+            if ha != hb:
+                diffs.append(i)
+        # If one side has extra leaves, mark them as diffs too
+        if len(a_leaves) != len(b_leaves):
+            longer = max(len(a_leaves), len(b_leaves))
+            for i in range(min(len(a_leaves), len(b_leaves)), longer):
+                diffs.append(i)
+        return diffs
+
+
+def run_anti_entropy(nodes: List[QNode], keys: List[str]) -> None:
+    """
+    Pairwise Merkle anti-entropy between all nodes.
+    """
+    print("\nMerkle: comparing replicas")
+    total_repairs = 0
+    for i in range(len(nodes)):
+        for j in range(i + 1, len(nodes)):
+            a = nodes[i]
+            b = nodes[j]
+
+            tree_a = MerkleTree.for_node(a, keys)
+            tree_b = MerkleTree.for_node(b, keys)
+
+            if tree_a.root() == tree_b.root():
+                continue
+
+            diff_idx = tree_a.diff_leaf_indices(tree_b)
+            if not diff_idx:
+                continue
+
+            print(f"[AntiEntropy] {a.name} <-> {b.name}: {len(diff_idx)} differing keys")
+
+            for idx in diff_idx:
+                if idx >= len(keys):
+                    continue
+                k = keys[idx]
+                va = a.get(k)
+                vb = b.get(k)
+                if va is None and vb is None:
+                    continue
+                if va is None:
+                    v, ver = vb  # type: ignore[misc]
+                    a.put(k, v, ver)
+                    total_repairs += 1
+                elif vb is None:
+                    v, ver = va
+                    b.put(k, v, ver)
+                    total_repairs += 1
+                else:
+                    va_val, va_ver = va
+                    vb_val, vb_ver = vb
+                    if va_ver > vb_ver:
+                        b.put(k, va_val, va_ver)
+                        total_repairs += 1
+                    elif vb_ver > va_ver:
+                        a.put(k, vb_val, vb_ver)
+                        total_repairs += 1
+                    # if == version, ignore
+    print(f"[AntiEntropy] Total repaired entries: {total_repairs}")
+
+
+def demo_quorums_and_merkle():
+    print("\nQuorum: Consistent Hash + N/R/W + Merkle Anti-Entropy")
+
+    # versioned nodes and router
+    nodes_q = [QNode(f"q{i}") for i in range(4)]
+    ch_q = ConsistentHashRouter(nodes_q, vnodes=64)
+
+    client = QuorumKVClient(
+        ch_q,
+        replication_factor=3,  # N
+        read_quorum=2,         # R
+        write_quorum=2,        # W
+    )
+
+    keys = [f"k{i}" for i in range(10)]
+
+    print("\n[Quorum] Writing initial values with quorums")
+    for i, k in enumerate(keys):
+        ok = client.put(k, f"V{i}")
+        print(f"PUT {k} = V{i} -> {ok}")
+
+    print("\n[Quorum] Reads before any divergence")
+    for k in keys:
+        print(f"GET {k} -> {client.get(k)}")
+
+    # Simulate divergence: one node misses some keys
+    victim = nodes_q[2]  # q2
+    print("\n[Quorum] Simulating divergence: deleting some keys from q2 directly")
+    for k in keys[:3]:
+        victim.store.pop(k, None)
+
+    # Also corrupt a version on another node
+    corrupt = nodes_q[1]  # q1
+    if "k5" in corrupt.store:
+        v, ver = corrupt.store["k5"]
+        corrupt.store["k5"] = (v + "_stale", max(0, ver - 1))
+        print("[Quorum] Corrupted k5 on q1 with older version")
+
+    print("\n[Quorum] Reads after divergence (before anti-entropy)")
+    for k in keys:
+        print(f"GET {k} -> {client.get(k)}")
+
+    # Run Merkle anti-entropy over all nodes
+    run_anti_entropy(nodes_q, keys)
+
+    print("\n[Quorum] Reads after Merkle anti-entropy repair")
+    for k in keys:
+        print(f"GET {k} -> {client.get(k)}")
+
+
 if __name__ == "__main__":
     demo()
+    demo_quorums_and_merkle()

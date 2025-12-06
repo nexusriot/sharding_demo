@@ -1,13 +1,13 @@
-# Distributed Sharding & Replication (with Health Checks + Quorums)
-Disclaimer: This is a PoC demo - Just for fun ;)
-
+# Distributed Sharding & Replication (with Health Checks + Quorums + Merkle Anti-Entropy)
+**Disclaimer:** This is a PoC demo — just for fun ;)
 
 - Client → Router → Replicas flow  
 - Modulo sharding w/ R replicas  
 - Consistent hashing w/ vnodes & R replicas  
 - Health-based routing  
 - End-to-end PUT/GET flows  
-- Quorums (W/R)
+- Quorums (W/R)  
+- Merkle Anti-Entropy
 
 ## High-Level Architecture
 
@@ -107,8 +107,8 @@ If `n0` is down:
 
 Effects:
 
-- `put` → write only to healthy replicas (warn if <R)
-- `get` → try healthy nodes until value found
+- `put` → write only to healthy replicas (warn if <R)  
+- `get` → try healthy nodes until value found  
 
 ## End-to-End Sequences
 
@@ -205,10 +205,37 @@ Replicas overwrite only when:
 | Consistency | eventual | strong if R+W>N |
 | Repair | none | automatic read repair |
 
+# Merkle Anti-Entropy
+
+Even with replication + quorums, replicas may drift over time due to failures, partitions or missed updates.
+
+**Merkle Trees** provide efficient background reconciliation:
+
+- Each replica builds a hash tree over `(key, value, version)`  
+- Roots are compared  
+- If roots match → replicas identical  
+- If not → compare subtrees or leaves (simplified in this PoC)  
+- Only keys that actually diverge are exchanged  
+- The version with the highest timestamp wins  
+
+This allows **full replica convergence** with very low bandwidth.
+
+### Merkle Repair Flow
+
+1. Each replica builds a Merkle tree using the same key ordering  
+2. Compare root hashes  
+3. If different → identify differing leaves  
+4. Sync only those keys  
+5. Mutate stale replicas to the newest version  
+6. After sync, all nodes converge
+
+
 ## Next Improvements
 
-- Quorums (W/R) ✔️
+- Quorums (W/R) ✔️  
+- Merkle anti-entropy ✔️  
 - Read repair  
-- Merkle anti-entropy  
 - Gossip for health  
 - Tunable consistency per request  
+- Background repair scheduler  
+- Partition healing strategies  

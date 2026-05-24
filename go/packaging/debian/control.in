@@ -1,0 +1,13 @@
+Package: sharding-demo
+Version: @VERSION@
+Section: misc
+Priority: optional
+Architecture: @ARCH@
+Maintainer: Vlad Ananyev <vlananyev@gmail.com>
+Homepage: https://github.com/nexusriot/sharding_demo
+Description: Distributed sharding & replication PoC (Go port)
+ Single-host PoC demonstrating modulo sharding, consistent-hashing
+ with virtual nodes, health-aware replica selection, N/R/W quorums
+ with read-repair, and Merkle anti-entropy. Ships two binaries:
+   sharding-demo      - non-interactive walkthrough printed to stdout
+   sharding-demo-tui  - bubbletea live dashboard of the ring & replicas

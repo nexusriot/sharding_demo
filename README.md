@@ -9,6 +9,25 @@
 - Quorums (W/R)  
 - Merkle Anti-Entropy
 
+## Implementations
+
+Two parallel ports of the same model live in this repo. Pick whichever you
+prefer — the algorithms and on-screen output are intentionally equivalent.
+
+| | Python | Go |
+|---|---|---|
+| Demo (non-interactive) | [`demo.py`](demo.py) | [`go/cmd/demo`](go/cmd/demo/main.go) |
+| Live TUI dashboard     | [`tui.py`](tui.py) (Rich) | [`go/cmd/tui`](go/cmd/tui/main.go) (Bubbletea) |
+| Dependencies           | `rich` only                | `bubbletea`, `lipgloss` |
+| Run                    | `python3 demo.py` / `python3 tui.py` | `cd go && make demo` / `make tui` |
+| Tests                  | —                          | `cd go && make test` (17 unit tests + benchmarks) |
+| Install                | —                          | `cd go && make deb && sudo dpkg -i dist/*.deb` |
+
+The TUI shows the consistent-hash ring, per-node health and key counts, a
+live primary-distribution bar chart, and a step-by-step trace of which
+nodes are visited when a key is routed. See [`go/README.md`](go/README.md)
+for a guided walkthrough of the panels and hotkeys.
+
 ## High-Level Architecture
 
     +---------+        +----------------------+        +----------------------------+

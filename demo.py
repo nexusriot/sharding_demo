@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Iterable, Optional, Set
 
 
-# ------------------------------ Storage node ------------------------------
 
 @dataclass
 class Node:
@@ -25,8 +24,6 @@ class Node:
     def delete(self, k: str) -> None:
         self.store.pop(k, None)
 
-
-# ------------------------------ Modulo sharding w/ replication ------------------------------
 
 class ModuloRouter:
     """Shard by hash(key) % N, with replication and health awareness."""
@@ -80,8 +77,6 @@ class ModuloRouter:
             if n.name == name:
                 n.healthy = healthy
 
-
-# ------------------------------ Consistent hashing (vnodes) w/ replication ------------------------------
 
 class ConsistentHashRouter:
     """
@@ -149,8 +144,6 @@ class ConsistentHashRouter:
         return chosen
 
 
-# ------------------------------ Client facade with replication & health ------------------------------
-
 class KVClient:
     def __init__(self, router, replication_factor: int = 3) -> None:
         self.router = router
@@ -195,8 +188,6 @@ class KVClient:
             n.delete(k)
 
 
-# ------------------------------ Demo & utilities ------------------------------
-
 def distribution(keys: List[str], replicas_func, label: str) -> Dict[str, int]:
     buckets = defaultdict(int)
     for k in keys:
@@ -226,7 +217,6 @@ def demo():
     random.seed(42) # the answer to life the universe and everything
     keys = [f"k{i}-{random.getrandbits(32)}" for i in range(5_000)]
 
-    # ---------- Modulo + replication ----------
     mod = ModuloRouter(nodes_mod)
     client_mod = KVClient(mod, replication_factor=3)
 
@@ -243,7 +233,6 @@ def demo():
     sample = keys[0]
     print(f"GET {sample} -> {client_mod.get(sample)}")
 
-    # ---------- Consistent Hash + replication ----------
     ch = ConsistentHashRouter(nodes_ch, vnodes=128)
     client_ch = KVClient(ch, replication_factor=3)
     for k in keys:

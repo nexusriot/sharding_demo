@@ -28,3 +28,10 @@ MANIFEST
 
 # idea
 .idea/
+
+# Go build artifacts
+go/bin/
+go/dist/
+go/coverage.out
+*.test
+*.out
